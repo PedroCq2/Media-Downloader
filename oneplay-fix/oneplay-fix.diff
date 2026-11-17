@@ -1,0 +1,199 @@
+--- Oneplay.orig.java	2026-11-17 14:43:55.889490498 +0000
++++ plugins/media_engine.novavoyo/sune/app/mediadown/media_engine/novavoyo/Oneplay.java	2026-11-17 14:44:06.757711848 +0000
+@@ -36,6 +36,7 @@
+ import sune.app.mediadown.task.ListTask;
+ import sune.app.mediadown.util.CheckedFunction;
+ import sune.app.mediadown.util.JSON.JSONCollection;
++import sune.app.mediadown.util.JSON.JSONNode;
+ import sune.app.mediadown.util.JSON.JSONObject;
+ import sune.app.mediadown.util.Ref;
+ import sune.app.mediadown.util.Regex;
+@@ -200,6 +201,7 @@
+ 		
+ 		JSONCollection data = successData(connection.request("app.init", payload, customData));
+ 		JSONCollection startAction = data.getCollection("startAction");
++		String routeTitle = data.getString("startAction.route.title");
+ 		
+ 		do {
+ 			JSONCollection callPayload = startAction.getCollection("params.payload");
+@@ -208,7 +210,7 @@
+ 			switch(startAction.getString("call")) {
+ 				case "content.play":
+ 					// Return just the raw payload, it will be passed along
+-					return new PlayPayload(callPayload, false);
++					return new PlayPayload(callPayload, false, routeTitle);
+ 				case "page.content.display":
+ 					startAction = successData(connection.request("page.content.display", callPayload));
+ 					
+@@ -225,7 +227,7 @@
+ 					startAction = mainBlock;
+ 					continue; // Updated the data, try again
+ 				case "user.upsell.preview":
+-					return new PlayPayload(null, true);
++					return new PlayPayload(null, true, routeTitle);
+ 				default:
+ 					return null; // Currently unsupported path
+ 			}
+@@ -269,7 +271,7 @@
+ 			
+ 			// Remove redundant information from the episode title. Variations include
+ 			// text such as "X. díl" or "Díl X".
+-			if(numEpisode > 0) {
++			if(numEpisode > 0 && title != null) {
+ 				Regex regex = Regex.of(String.format(
+ 					"(?uis)(?:%1$s\\.?\\s*%2$s|%2$s\\s*%1$s\\.?)(?:\\s*[,-]\\s*)?",
+ 					Regex.quote("" + numEpisode), "d[ií]l|epizoda"
+@@ -453,15 +455,108 @@
+ 		return episodeInfos;
+ 	}
+ 	
+-	private final String getMediaTitle(JSONCollection data) {
+-		MediaInfo info = getMediaInfo(data.getCollection("playerControl.tracking.contentData"));
++	private final String getMediaTitle(JSONCollection data, String fallbackTitle, URI uri) {
++		JSONCollection contentData = data.getCollection("playerControl.tracking.contentData");
+ 		
+-		return MediaUtils.mediaTitle(
+-			info.programName(),
+-			info.seasonNumber(),
+-			info.episodeNumber(),
+-			info.title()
+-		);
++		if(contentData == null) {
++			// The response structure changed, try to find the content data elsewhere
++			contentData = findContentData(data, 0);
++			dumpResponseStructure(data);
++		}
++		
++		if(contentData != null && contentData.hasString("title")) {
++			MediaInfo info = getMediaInfo(contentData);
++			String programName = info.programName();
++			String title = info.title();
++			
++			if(isBlank(programName)) {
++				programName = !isBlank(title) ? title : fallbackTitle;
++				title = null;
++			}
++			
++			if(!isBlank(programName)) {
++				return MediaUtils.mediaTitle(
++					programName,
++					info.seasonNumber(),
++					info.episodeNumber(),
++					title
++				);
++			}
++		}
++		
++		String name = !isBlank(fallbackTitle) ? fallbackTitle : titleFromUri(uri);
++		return MediaUtils.mediaTitle(name, 0, 0, null);
++	}
++	
++	private static final boolean isBlank(String string) {
++		return string == null || string.isBlank();
++	}
++	
++	private static final String titleFromUri(URI uri) {
++		String path = uri.getPath();
++		
++		if(path != null) {
++			String[] parts = path.split("/");
++			
++			for(int i = parts.length - 1; i >= 0; --i) {
++				if(!parts[i].isBlank()) {
++					return parts[i];
++				}
++			}
++		}
++		
++		return "oneplay";
++	}
++	
++	private static final JSONCollection findContentData(JSONCollection data, int depth) {
++		if(data == null || depth > 8) {
++			return null;
++		}
++		
++		JSONCollection candidate = data.getCollection("contentData");
++		if(candidate != null && candidate.hasString("title")) {
++			return candidate;
++		}
++		
++		for(JSONCollection child : data.collectionsIterable()) {
++			JSONCollection found = findContentData(child, depth + 1);
++			
++			if(found != null) {
++				return found;
++			}
++		}
++		
++		return null;
++	}
++	
++	// Writes only the key paths (no values, no tokens) of the content.play response
++	// to the temporary directory, so that the new structure can be inspected.
++	private static final void dumpResponseStructure(JSONCollection data) {
++		try {
++			StringBuilder builder = new StringBuilder();
++			dumpKeys(data, "", builder, 0);
++			java.nio.file.Path path = java.nio.file.Path.of(
++				System.getProperty("java.io.tmpdir"), "oneplay-content-play-keys.txt"
++			);
++			java.nio.file.Files.writeString(path, builder.toString());
++		} catch(Exception ex) {
++			// Ignore, diagnostics only
++		}
++	}
++	
++	private static final void dumpKeys(JSONCollection data, String prefix, StringBuilder builder, int depth) {
++		if(depth > 12) return;
++		
++		for(JSONNode node : data.nodesIterable()) {
++			String path = prefix.isEmpty() ? node.name() : prefix + "." + node.name();
++			
++			if(node.isCollection()) {
++				builder.append(path).append('\n');
++				dumpKeys((JSONCollection) node, path, builder, depth + 1);
++			} else {
++				builder.append(path).append(" : ").append(((JSONObject) node).type()).append('\n');
++			}
++		}
+ 	}
+ 	
+ 	private final Device webDevice() {
+@@ -661,9 +756,17 @@
+ 			
+ 			MediaSource source = MediaSource.of(engine);
+ 			URI sourceUri = uri;
+-			String title = getMediaTitle(data);
++			String title = getMediaTitle(data, playPayload.title(), uri);
+ 			JSONCollection streams = data.getCollection("media.stream.assets");
+ 			
++			if(streams == null) {
++				dumpResponseStructure(data);
++				throw new IllegalStateException(
++					"Oneplay: missing media.stream.assets in the response, see "
++						+ System.getProperty("java.io.tmpdir") + "oneplay-content-play-keys.txt"
++				);
++			}
++			
+ 			for(JSONCollection stream : streams.collectionsIterable()) {
+ 				MediaFormat format = MediaFormat.fromName(stream.getString("protocol"));
+ 				URI videoUri = Net.uri(stream.getString("src"));
+@@ -1057,13 +1160,16 @@
+ 		
+ 		private final JSONCollection payload;
+ 		private final boolean isUpsell;
++		private final String title;
+ 		
+-		public PlayPayload(JSONCollection payload, boolean isUpsell) {
++		public PlayPayload(JSONCollection payload, boolean isUpsell, String title) {
+ 			this.payload = payload;
+ 			this.isUpsell = isUpsell;
++			this.title = title;
+ 		}
+ 		
+ 		public JSONCollection payload() { return payload; }
+ 		public boolean isUpsell() { return isUpsell; }
++		public String title() { return title; }
+ 	}
+ }
