@@ -488,6 +488,37 @@ public final class Oneplay {
 		return MediaUtils.mediaTitle(name, 0, 0, null);
 	}
 	
+	// Builds a readable message from an error that Oneplay normally shows in a dialog,
+	// e.g. when the device limit or the concurrent streams limit is reached.
+	private static final String customErrorMessage(JSONCollection data) {
+		StringBuilder builder = new StringBuilder("Oneplay");
+		String code = data.getString("result.code");
+		if(!isBlank(code)) builder.append(" (").append(code).append(')');
+		builder.append(": ");
+		
+		String message = data.getString("result.message");
+		String description = data.getString("result.description");
+		builder.append(!isBlank(message) ? message : "Content cannot be played");
+		if(!isBlank(description)) builder.append(" ").append(description);
+		
+		JSONCollection devices = data.getCollection("result.customError.devices.devices");
+		if(devices != null && devices.length() > 0) {
+			builder.append("\nZařízení na účtu (odeberte nepoužívaná na oneplay.cz):");
+			
+			for(JSONCollection device : devices.collectionsIterable()) {
+				builder.append("\n - ").append(device.getString("name", "?"));
+				String type = device.getString("deviceType");
+				if(!isBlank(type)) builder.append(" [").append(type).append(']');
+				String lastUsed = device.getString("lastUsedAtFormatted");
+				if(!isBlank(lastUsed)) builder.append(", naposledy ").append(lastUsed);
+				if(device.getBoolean("isStreaming", false)) builder.append(", PRÁVĚ PŘEHRÁVÁ");
+				if(device.getBoolean("isCurrent", false)) builder.append(" (toto zařízení)");
+			}
+		}
+		
+		return builder.toString();
+	}
+	
 	private static final boolean isBlank(String string) {
 		return string == null || string.isBlank();
 	}
@@ -753,6 +784,10 @@ public final class Oneplay {
 					playbackCapabilities()
 				));
 			});
+			
+			if(data.hasCollection("result.customError")) {
+				throw new MessageException(customErrorMessage(data));
+			}
 			
 			MediaSource source = MediaSource.of(engine);
 			URI sourceUri = uri;

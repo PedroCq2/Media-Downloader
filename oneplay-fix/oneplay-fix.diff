@@ -1,5 +1,5 @@
---- Oneplay.orig.java	2026-11-17 14:43:55.889490498 +0000
-+++ plugins/media_engine.novavoyo/sune/app/mediadown/media_engine/novavoyo/Oneplay.java	2026-11-17 14:44:06.757711848 +0000
+--- /tmp/claude-0/-home-user-Media-Downloader/3f3e11f0-d99c-5846-b753-2bac5129fb13/scratchpad/Oneplay.orig.java	2026-11-17 14:43:55.889490498 +0000
++++ oneplay-fix/Oneplay.java	2026-11-17 14:53:20.657111338 +0000
 @@ -36,6 +36,7 @@
  import sune.app.mediadown.task.ListTask;
  import sune.app.mediadown.util.CheckedFunction;
@@ -43,7 +43,7 @@
  				Regex regex = Regex.of(String.format(
  					"(?uis)(?:%1$s\\.?\\s*%2$s|%2$s\\s*%1$s\\.?)(?:\\s*[,-]\\s*)?",
  					Regex.quote("" + numEpisode), "d[ií]l|epizoda"
-@@ -453,15 +455,108 @@
+@@ -453,15 +455,139 @@
  		return episodeInfos;
  	}
  	
@@ -86,6 +86,37 @@
 +		
 +		String name = !isBlank(fallbackTitle) ? fallbackTitle : titleFromUri(uri);
 +		return MediaUtils.mediaTitle(name, 0, 0, null);
++	}
++	
++	// Builds a readable message from an error that Oneplay normally shows in a dialog,
++	// e.g. when the device limit or the concurrent streams limit is reached.
++	private static final String customErrorMessage(JSONCollection data) {
++		StringBuilder builder = new StringBuilder("Oneplay");
++		String code = data.getString("result.code");
++		if(!isBlank(code)) builder.append(" (").append(code).append(')');
++		builder.append(": ");
++		
++		String message = data.getString("result.message");
++		String description = data.getString("result.description");
++		builder.append(!isBlank(message) ? message : "Content cannot be played");
++		if(!isBlank(description)) builder.append(" ").append(description);
++		
++		JSONCollection devices = data.getCollection("result.customError.devices.devices");
++		if(devices != null && devices.length() > 0) {
++			builder.append("\nZařízení na účtu (odeberte nepoužívaná na oneplay.cz):");
++			
++			for(JSONCollection device : devices.collectionsIterable()) {
++				builder.append("\n - ").append(device.getString("name", "?"));
++				String type = device.getString("deviceType");
++				if(!isBlank(type)) builder.append(" [").append(type).append(']');
++				String lastUsed = device.getString("lastUsedAtFormatted");
++				if(!isBlank(lastUsed)) builder.append(", naposledy ").append(lastUsed);
++				if(device.getBoolean("isStreaming", false)) builder.append(", PRÁVĚ PŘEHRÁVÁ");
++				if(device.getBoolean("isCurrent", false)) builder.append(" (toto zařízení)");
++			}
++		}
++		
++		return builder.toString();
 +	}
 +	
 +	private static final boolean isBlank(String string) {
@@ -160,8 +191,14 @@
  	}
  	
  	private final Device webDevice() {
-@@ -661,9 +756,17 @@
+@@ -659,11 +785,23 @@
+ 				));
+ 			});
  			
++			if(data.hasCollection("result.customError")) {
++				throw new MessageException(customErrorMessage(data));
++			}
++			
  			MediaSource source = MediaSource.of(engine);
  			URI sourceUri = uri;
 -			String title = getMediaTitle(data);
@@ -179,7 +216,7 @@
  			for(JSONCollection stream : streams.collectionsIterable()) {
  				MediaFormat format = MediaFormat.fromName(stream.getString("protocol"));
  				URI videoUri = Net.uri(stream.getString("src"));
-@@ -1057,13 +1160,16 @@
+@@ -1057,13 +1195,16 @@
  		
  		private final JSONCollection payload;
  		private final boolean isUpsell;
